@@ -19,7 +19,7 @@ import pandas as pd
 # ─── Configuración de página ──────────────────────────────────────────────────
 
 st.set_page_config(
-    page_title="Validador · DISPOWER",
+    page_title="Motor de Facturación · DISPOWER",
     page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -83,7 +83,7 @@ st.markdown("""
 
 st.markdown("""
 <div class="app-header">
-  <h1>⚡ Validador Dispower · ZNI / SISFV</h1>
+  <h1>⚡ Motor de Facturación · ZNI / SISFV</h1>
   <p>Clasificación automática de usuarios para facturación — DISPOWER S.A.S. E.S.P.</p>
 </div>
 """, unsafe_allow_html=True)
@@ -446,7 +446,7 @@ if "df_resultado" in st.session_state:
 
     st.markdown(f"**{len(df_vista):,} registros** mostrados")
     st.dataframe(
-        df_vista.style.applymap(colorear_estado, subset=["Estado de Facturación"]),
+        df_vista.style.map(colorear_estado, subset=["Estado de Facturación"]),
         use_container_width=True,
         height=440,
     )
