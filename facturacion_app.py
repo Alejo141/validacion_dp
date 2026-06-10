@@ -98,7 +98,7 @@ COL_SEMAFORO  = "Semaforo"
 COL_SUBMENU3  = "SubMenu3"
 
 # Valores de Semáforo que indican ticket ABIERTO
-SEMAFOROS_ABIERTOS = {"critico", "moderado", "leve"}
+SEMAFOROS_ABIERTOS = {"CRITICO", "MODERADO", "LEVE"}
 
 # Valores relevantes de SubMenu3 (en mayúsculas para comparación)
 SUBMENU_BLOQUEA   = "BLOQUEA FACTURACION"
@@ -123,9 +123,28 @@ def normalizar_nui(serie: pd.Series) -> pd.Series:
     return serie.astype(str).str.strip().str.upper().replace("NAN", pd.NA)
 
 
+def quitar_tildes(texto: str) -> str:
+    """Elimina tildes y diacríticos. Ej: 'Crítico' → 'Critico'"""
+    import unicodedata
+    return "".join(
+        c for c in unicodedata.normalize("NFD", texto)
+        if unicodedata.category(c) != "Mn"
+    )
+
+
 def normalizar_texto(serie: pd.Series) -> pd.Series:
-    """Normaliza texto: strip + mayúsculas."""
-    return serie.fillna("").astype(str).str.strip().str.upper()
+    """Normaliza texto: strip + sin tildes + mayúsculas.
+    
+    'Crítico' → 'CRITICO' | 'crítico' → 'CRITICO'
+    Evita fallos por tildes en los valores del Excel.
+    """
+    return (
+        serie.fillna("")
+        .astype(str)
+        .str.strip()
+        .apply(quitar_tildes)
+        .str.upper()
+    )
 
 
 def reportar_duplicados(df: pd.DataFrame, nombre: str) -> None:
