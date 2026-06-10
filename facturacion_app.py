@@ -91,7 +91,7 @@ st.markdown("""
 
 st.markdown("""
 <div class="app-header">
-  <h1>⚡ Motor de Facturación · ZNI / SISFV</h1>
+  <h1>⚡ Validador Dispower · ZNI / SISFV</h1>
   <p>Automatización de base para facturación — DISPOWER S.A.S. E.S.P.</p>
 </div>
 """, unsafe_allow_html=True)
