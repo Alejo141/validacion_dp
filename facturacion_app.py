@@ -11,7 +11,7 @@ from typing import Optional
 # ─── Configuración de página ──────────────────────────────────────────────────
 
 st.set_page_config(
-    page_title="Motor de Facturación · DISPOWER",
+    page_title="Validador · DISPOWER",
     page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -92,7 +92,7 @@ st.markdown("""
 st.markdown("""
 <div class="app-header">
   <h1>⚡ Motor de Facturación · ZNI / SISFV</h1>
-  <p>Clasificación automática de usuarios para facturación — DISPOWER S.A.S. E.S.P.</p>
+  <p>Automatización de base para facturación — DISPOWER S.A.S. E.S.P.</p>
 </div>
 """, unsafe_allow_html=True)
 
