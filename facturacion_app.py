@@ -615,12 +615,12 @@ if procesar:
 # ═════════════════════════════════════════════════════════════════════════════
 
 if "df_resultado" in st.session_state:
-    df_res    = st.session_state["df_resultado"]
-    alertas   = st.session_state.get("alertas", [])
-    anio_vis  = st.session_state["anio_sel"]
-    mes_vis   = st.session_state["mes_sel"]
-    dias_vis  = st.session_state["dias_mes"]
-    fin_vis   = st.session_state["fin_mes"]
+    df_res   = st.session_state["df_resultado"]
+    alertas  = st.session_state.get("alertas", [])
+    anio_vis = st.session_state.get("anio_sel", anio_sel)
+    mes_vis  = st.session_state.get("mes_sel",  mes_sel)
+    dias_vis = st.session_state.get("dias_mes", dias_mes)
+    fin_vis  = st.session_state.get("fin_mes",  fin_mes)
 
     # Banner de período
     st.markdown(f"""
