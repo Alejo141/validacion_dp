@@ -183,6 +183,14 @@ def clasificar_nui_sac(grupo: pd.DataFrame, ini: pd.Timestamp,
         sub    = r[COL_SUBMENU3]
         concat = str(r.get(COL_CONCAT, "")).upper()
         sem    = r[COL_SEMAFORO]
+
+        # Ignorar tickets creados DESPUÉS del último día del mes analizado
+        fcreac_raw = r.get(col_creacion, None)
+        if fcreac_raw is not None:
+            fc_creac = parsear_fechas(pd.Series([fcreac_raw])).iloc[0]
+            if pd.notna(fc_creac) and fc_creac > fin:
+                continue  # ticket futuro, no aplica al período
+
         fce    = fc_efectiva(sem, r["_fc"], fin)   # cuándo TERMINA el bloqueo
 
         if fce < ini:
@@ -282,8 +290,12 @@ def clasificar_nui_hurtos_con_sac(nui: str,
     REPOS = REPOSICION_KEYWORD
 
     # Filtrar tickets del NUI en SAC que tengan "REPOSICION" en Concatenado
-    tickets_repos = df_sac_nui[
-        df_sac_nui["_concat_upper"].str.contains(REPOS, na=False)
+    # Excluir tickets con FechaCreacion posterior al fin del mes
+    df_sac_valido = df_sac_nui[
+        df_sac_nui["_fc_creac"].isna() | (df_sac_nui["_fc_creac"] <= fin)
+    ]
+    tickets_repos = df_sac_valido[
+        df_sac_valido["_concat_upper"].str.contains(REPOS, na=False)
     ]
 
     # ── Sin ticket de reposición → No facturar ────────────────────────────
@@ -368,6 +380,7 @@ def consolidar_hurtos(df_h: pd.DataFrame,
     sac["_concat_upper"]  = sac[COL_CONCAT].fillna("").astype(str).str.upper()
     sac["_semaforo_n"]    = normalizar_texto(sac[COL_SEMAFORO])
     sac["_fc"]            = parsear_fechas(sac[COL_FC])
+    sac["_fc_creac"]      = parsear_fechas(sac[COL_FECHA_CREACION])
 
     resultado = {}
     for nui in df[COL_NUI].unique():
