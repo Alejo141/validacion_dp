@@ -157,7 +157,8 @@ def calcular_prorrateo(fc: pd.Timestamp, ini: pd.Timestamp,
 
 
 def clasificar_nui_sac(grupo: pd.DataFrame, ini: pd.Timestamp,
-                        fin: pd.Timestamp, dias_mes: int) -> dict:
+                        fin: pd.Timestamp, dias_mes: int,
+                        col_creacion: str = "FechaCreacion") -> dict:
     """
     Determina la decisión SAC para un NUI en el período dado.
 
@@ -172,7 +173,7 @@ def clasificar_nui_sac(grupo: pd.DataFrame, ini: pd.Timestamp,
       NO BLOQUEA + REPOSICION en Concatenado → prorrateo si cerrado en mes
       Cualquier otro       → se ignora (no afecta facturación)
     """
-    activos_bloquea   = []
+    activos_bloquea   = []  # lista de (fc_inicio_bloqueo, fc_fin_bloqueo)
     activos_descuento = []
     activos_repos     = []   # NO BLOQUEA + REPOSICION en Concatenado
 
@@ -180,13 +181,23 @@ def clasificar_nui_sac(grupo: pd.DataFrame, ini: pd.Timestamp,
         sub    = r[COL_SUBMENU3]
         concat = str(r.get(COL_CONCAT, "")).upper()
         sem    = r[COL_SEMAFORO]
-        fce    = fc_efectiva(sem, r["_fc"], fin)
+        fce    = fc_efectiva(sem, r["_fc"], fin)   # cuándo TERMINA el bloqueo
 
         if fce < ini:
-            continue  # cerrado antes del mes, no afecta
+            continue  # terminó antes del mes, no afecta
 
         if sub == SUBMENU_BLOQUEA:
-            activos_bloquea.append(fce)
+            # Determinar cuándo INICIA el bloqueo dentro del mes:
+            # Si el ticket estaba abierto antes del mes → inicia en ini_mes
+            # Si el ticket se creó dentro del mes → inicia en FechaCreacion
+            fcreac = parsear_fechas(pd.Series([r.get(col_creacion, "")])).iloc[0]
+            if pd.notna(fcreac) and fcreac > ini:
+                # Ticket creado dentro del mes
+                inicio_bloqueo = max(fcreac, ini)
+            else:
+                # Ticket existía antes del mes → bloquea desde el primer día
+                inicio_bloqueo = ini
+            activos_bloquea.append((inicio_bloqueo, fce))
 
         elif sub == SUBMENU_DESCUENTO:
             activos_descuento.append(fce)
@@ -201,14 +212,27 @@ def clasificar_nui_sac(grupo: pd.DataFrame, ini: pd.Timestamp,
 
     # ── Prioridad 1: BLOQUEA ────────────────────────────────────────────────
     if activos_bloquea:
-        fc_max = max(activos_bloquea)
-        if fc_max >= fin:
+        # Calcular días TOTALES bloqueados en el mes considerando
+        # el inicio más temprano y el fin más tardío de todos los tickets BLOQUEA.
+        # Si cualquier ticket empezó antes o en ini_mes y sigue abierto → bloqueo completo.
+        inicio_min = min(t[0] for t in activos_bloquea)  # inicio de bloqueo más temprano
+        fc_max     = max(t[1] for t in activos_bloquea)  # fin de bloqueo más tardío
+
+        if inicio_min <= ini and fc_max >= fin:
+            # Bloqueado todo el mes
             return {"_dec":"BLOQUEA", "_factor":0.0,
                     "_dias_fact":0, "_dias_total":dias_mes, "_fc_display":None}
         else:
-            f, df_, dt_ = calcular_prorrateo(fc_max, ini, fin, dias_mes)
-            return {"_dec":"BLOQUEA_PARCIAL", "_factor":f,
-                    "_dias_fact":df_, "_dias_total":dt_, "_fc_display":fc_max}
+            # Calcular días efectivamente bloqueados en el mes
+            inicio_bloq_efectivo = max(inicio_min, ini)
+            fin_bloq_efectivo    = min(fc_max, fin)
+            dias_bloqueados      = (fin_bloq_efectivo - inicio_bloq_efectivo).days + 1
+            dias_fact            = dias_mes - dias_bloqueados
+            if dias_fact < 0: dias_fact = 0
+            factor = round(dias_fact / dias_mes, 6)
+            return {"_dec":"BLOQUEA_PARCIAL", "_factor":factor,
+                    "_dias_fact":int(dias_fact), "_dias_total":dias_mes,
+                    "_fc_display":fin_bloq_efectivo}
 
     # ── Prioridad 2: DESCUENTO ──────────────────────────────────────────────
     if activos_descuento:
@@ -278,7 +302,8 @@ def consolidar_sac(df_sac: pd.DataFrame, ini: pd.Timestamp,
 
     filas = []
     for nui, grupo in df.groupby(COL_NUI):
-        info = clasificar_nui_sac(grupo, ini, fin, dias_mes)
+        info = clasificar_nui_sac(grupo, ini, fin, dias_mes,
+                                  col_creacion=COL_FECHA_CREACION)
         info["NUI"] = nui
         filas.append(info)
     return pd.DataFrame(filas)
