@@ -75,6 +75,7 @@ COL_NUI      = "NUI"
 COL_SEMAFORO = "Semaforo"
 COL_SUBMENU3 = "SubMenu3"
 COL_FC       = "FechaCierre"
+COL_FECHA_CREACION = "FechaCreacion"
 DATE_FMT     = "%d-%m-%Y"
 
 SEMAFOROS_ABIERTOS = {"CRITICO", "MODERADO", "LEVE"}
