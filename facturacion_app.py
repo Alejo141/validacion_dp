@@ -14,7 +14,6 @@ Clasificación por NUI:
                      y fc_efectiva >= fin_mes  → factor 0 (no factura)
   BLOQUEA_PARCIAL  → igual pero fc_efectiva dentro del mes → prorrateo
   DESCUENTO        → ticket activo con DESCUENTO COMERCIAL → factor 1
-  NOBLOQUEA_PARCIAL→ ticket cerrado en el mes con NO BLOQUEA → prorrateo
   SIN_NOVEDAD_SAC  → sin tickets activos en el período
 
 Prorrateo: factor = (días_mes - días_bloqueados) / días_mes
@@ -159,30 +158,30 @@ def clasificar_nui_sac(grupo: pd.DataFrame, ini: pd.Timestamp,
     """
     Determina la decisión SAC para un NUI en el período dado.
 
-    Usa FechaCierre como fuente de verdad:
-      1. Calcular fc_efectiva por ticket
-      2. Ignorar tickets con fc_efectiva < ini (cerrados antes del mes)
-      3. Entre los activos, priorizar BLOQUEA > DESCUENTO > otros
-      4. Si fc_efectiva >= fin → bloqueo/descuento completo
-         Si fc_efectiva < fin  → prorrateo
-      5. Tickets con SubMenu3 = NO BLOQUEA y fc_efectiva dentro del mes
-         → prorrateo (factura proporcional desde el día de cierre)
+    Solo generan prorrateo los tickets con SubMenu3 = BLOQUEA FACTURACION
+    o DESCUENTO COMERCIAL. Los tickets con NO BLOQUEA FACTURACION se ignoran
+    para efectos de prorrateo — no afectan la facturación del período.
+
+    Lógica por SubMenu3:
+      BLOQUEA FACTURACION  → bloquea o prorrateo según FechaCierre
+      DESCUENTO COMERCIAL  → sí facturar (completo o prorrateo)
+      Cualquier otro       → se ignora (no afecta facturación)
     """
     activos_bloquea   = []
     activos_descuento = []
-    activos_otros     = []
 
     for _, r in grupo.iterrows():
+        sub = r[COL_SUBMENU3]
+        # Solo procesar BLOQUEA y DESCUENTO; ignorar NO BLOQUEA y otros
+        if sub not in (SUBMENU_BLOQUEA, SUBMENU_DESCUENTO):
+            continue
         fce = fc_efectiva(r[COL_SEMAFORO], r["_fc"], fin)
         if fce < ini:
             continue  # cerrado antes del mes, no afecta
-        sub = r[COL_SUBMENU3]
         if sub == SUBMENU_BLOQUEA:
             activos_bloquea.append(fce)
-        elif sub == SUBMENU_DESCUENTO:
-            activos_descuento.append(fce)
         else:
-            activos_otros.append(fce)
+            activos_descuento.append(fce)
 
     # ── Prioridad 1: BLOQUEA ────────────────────────────────────────────────
     if activos_bloquea:
@@ -206,20 +205,7 @@ def clasificar_nui_sac(grupo: pd.DataFrame, ini: pd.Timestamp,
             return {"_dec":"DESCUENTO_PARCIAL", "_factor":f,
                     "_dias_fact":df_, "_dias_total":dt_, "_fc_display":fc_max}
 
-    # ── Prioridad 3: Ticket activo sin restricción bloqueante ───────────────
-    if activos_otros:
-        fc_max = max(activos_otros)
-        if fc_max >= fin:
-            # Abierto todo el mes, pero sin BLOQUEA → factura completo
-            return {"_dec":"SIN_NOVEDAD_SAC", "_factor":1.0,
-                    "_dias_fact":dias_mes, "_dias_total":dias_mes, "_fc_display":None}
-        else:
-            # Cerrado dentro del mes → prorrateo proporcional
-            f, df_, dt_ = calcular_prorrateo(fc_max, ini, fin, dias_mes)
-            return {"_dec":"NOBLOQUEA_PARCIAL", "_factor":f,
-                    "_dias_fact":df_, "_dias_total":dt_, "_fc_display":fc_max}
-
-    # ── Sin tickets activos en el período ───────────────────────────────────
+    # ── Sin tickets BLOQUEA/DESCUENTO activos → factura completo ───────────
     return {"_dec":"SIN_NOVEDAD_SAC", "_factor":1.0,
             "_dias_fact":dias_mes, "_dias_total":dias_mes, "_fc_display":None}
 
@@ -286,7 +272,7 @@ def aplicar_reglas(df_usuarios: pd.DataFrame, df_sac_c: pd.DataFrame,
                    hurtos_info: dict, dias_mes: int) -> pd.DataFrame:
     """
     Aplica las 4 reglas de facturación a cada NUI.
-    SAC tiene prioridad sobre hurtos (excepto NOBLOQUEA_PARCIAL que cede a hurtos).
+    SAC tiene prioridad sobre hurtos. Solo BLOQUEA FACTURACION genera prorrateo.
     """
     df_u = df_usuarios[[COL_NUI]].copy()
     df_u[COL_NUI] = normalizar_nui(df_u[COL_NUI])
@@ -330,31 +316,6 @@ def aplicar_reglas(df_usuarios: pd.DataFrame, df_sac_c: pd.DataFrame,
                       else "Ticket cerrado en el mes - Descuento comercial (prorrateo)")
             filas.append({"NUI":nui,"Estado de Facturación":"Sí facturar",
                 "Motivo":motivo,"Fuente de decisión":"SAC","Factor":fac,
-                "Días Facturables":df_,"Días del Mes":dt_,"Fecha Cierre Bloqueo":fcs})
-
-        # ── NOBLOQUEA_PARCIAL: ticket cerrado sin restricción → prorrateo ─────
-        elif dec == "NOBLOQUEA_PARCIAL":
-            # SAC no bloquea, pero hay que revisar hurtos también
-            if nui in hurtos_info:
-                h = hurtos_info[nui]
-                if h["_tipo"] != "YA_CERRADO":
-                    # Tomar el factor más restrictivo (menor)
-                    hf = h["_factor"]; hdf = h["_dias_fact"]
-                    hfc= h["_fc"]
-                    hfs= hfc.strftime("%d/%m/%Y") if hfc is not None else "—"
-                    f_final = min(fac, hf)
-                    df_final= int(f_final * dt_)
-                    estado  = "Sí facturar" if f_final > 0 else "No facturar"
-                    filas.append({"NUI":nui,"Estado de Facturación":estado,
-                        "Motivo":"Ticket cerrado en el mes + Hurto (prorrateo combinado)",
-                        "Fuente de decisión":"SAC + Hurtos","Factor":f_final,
-                        "Días Facturables":df_final,"Días del Mes":dt_,"Fecha Cierre Bloqueo":fcs})
-                    continue
-            # Sin hurto o hurto ya cerrado antes del mes → solo prorrateo SAC
-            estado = "Sí facturar" if fac > 0 else "No facturar"
-            filas.append({"NUI":nui,"Estado de Facturación":estado,
-                "Motivo":"Ticket cerrado en el mes - Sin restricción (prorrateo)",
-                "Fuente de decisión":"SAC","Factor":fac,
                 "Días Facturables":df_,"Días del Mes":dt_,"Fecha Cierre Bloqueo":fcs})
 
         # ── Reglas 3 y 4: sin decisión SAC → revisar hurtos ──────────────────
