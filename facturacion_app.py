@@ -394,24 +394,103 @@ def aplicar_reglas(df_usuarios: pd.DataFrame, df_sac_c: pd.DataFrame,
 # EXPORTACIÓN
 # ═════════════════════════════════════════════════════════════════════════════
 
+def autoajustar_columnas(ws) -> None:
+    """Ajusta el ancho de columnas y aplica estilo de encabezado."""
+    from openpyxl.styles import Font, PatternFill, Alignment
+    header_fill = PatternFill("solid", fgColor="0D2540")
+    header_font = Font(bold=True, color="F5A623")
+    for col in ws.columns:
+        mx = max((len(str(cell.value or "")) for cell in col), default=10)
+        ws.column_dimensions[col[0].column_letter].width = min(mx + 4, 55)
+    for cell in ws[1]:
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center")
+
+
 def exportar_excel(df: pd.DataFrame, anio: int, mes: int) -> bytes:
+    """
+    Genera Excel con 4 hojas:
+      NO_FACTURAR : factor = 0.0
+      FACTURAR    : factor = 1.0  (sin prorrateo)
+      PRORRATEO   : 0.0 < factor < 1.0  (todos los casos proporcionales)
+      RESUMEN     : conteos y descripción del período
+    """
+    from openpyxl.styles import Font, PatternFill, Alignment
+    import calendar as _cal
+
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as w:
-        no_fac  = df[df["Estado de Facturación"]=="No facturar"].reset_index(drop=True)
-        si_fac  = df[df["Estado de Facturación"]=="Sí facturar"].reset_index(drop=True)
-        prorr   = df[df["Factor"].between(0.001, 0.999)].reset_index(drop=True)
 
+        no_fac = df[df["Factor"] == 0.0].reset_index(drop=True)
+        si_fac = df[df["Factor"] == 1.0].reset_index(drop=True)
+        prorr  = df[df["Factor"].between(0.001, 0.999)].reset_index(drop=True)
+
+        # Ordenar prorrateo: por Factor ascendente (menor primero = más días bloqueados)
+        prorr = prorr.sort_values("Factor").reset_index(drop=True)
+
+        # ── Hoja NO_FACTURAR ─────────────────────────────────────────────────
         no_fac.to_excel(w, sheet_name="NO_FACTURAR", index=False)
-        si_fac.to_excel(w, sheet_name="FACTURAR",    index=False)
+        autoajustar_columnas(w.sheets["NO_FACTURAR"])
+
+        # ── Hoja FACTURAR ────────────────────────────────────────────────────
+        si_fac.to_excel(w, sheet_name="FACTURAR", index=False)
+        autoajustar_columnas(w.sheets["FACTURAR"])
+
+        # ── Hoja PRORRATEO ───────────────────────────────────────────────────
         if not prorr.empty:
             prorr.to_excel(w, sheet_name="PRORRATEO", index=False)
+            autoajustar_columnas(w.sheets["PRORRATEO"])
+        else:
+            # Crear hoja vacía con encabezados si no hay casos
+            pd.DataFrame(columns=df.columns).to_excel(
+                w, sheet_name="PRORRATEO", index=False
+            )
+            autoajustar_columnas(w.sheets["PRORRATEO"])
 
-        for sname, dfs in [("NO_FACTURAR",no_fac),("FACTURAR",si_fac)] + \
-                          ([("PRORRATEO",prorr)] if not prorr.empty else []):
-            ws = w.sheets[sname]
-            for col in ws.columns:
-                mx = max((len(str(c.value or "")) for c in col), default=10)
-                ws.column_dimensions[col[0].column_letter].width = min(mx+4, 55)
+        # ── Hoja RESUMEN ─────────────────────────────────────────────────────
+        dias_mes = _cal.monthrange(anio, mes)[1]
+        MESES = {1:"Enero",2:"Febrero",3:"Marzo",4:"Abril",5:"Mayo",6:"Junio",
+                 7:"Julio",8:"Agosto",9:"Septiembre",10:"Octubre",11:"Noviembre",12:"Diciembre"}
+        resumen_data = {
+            "Concepto": [
+                "Período de análisis",
+                "Fecha de corte",
+                "Días del mes",
+                "",
+                "Total usuarios",
+                "No facturar (factor 0.0)",
+                "Sí facturar (factor 1.0)",
+                "Prorrateo (factor parcial)",
+                "",
+                "% No facturar",
+                "% Sí facturar",
+                "% Prorrateo",
+            ],
+            "Valor": [
+                f"{MESES[mes]} {anio}",
+                f"{dias_mes:02d}/{mes:02d}/{anio}",
+                dias_mes,
+                "",
+                len(df),
+                len(no_fac),
+                len(si_fac),
+                len(prorr),
+                "",
+                f"{len(no_fac)/len(df)*100:.1f}%" if len(df) else "0%",
+                f"{len(si_fac)/len(df)*100:.1f}%" if len(df) else "0%",
+                f"{len(prorr)/len(df)*100:.1f}%" if len(df) else "0%",
+            ],
+        }
+        if not prorr.empty:
+            motivos = prorr.groupby("Motivo").size().reset_index(name="Cantidad")
+            resumen_data["Concepto"] += ["", "--- Detalle prorrateo por motivo ---"] +                                          motivos["Motivo"].tolist()
+            resumen_data["Valor"]    += ["", ""] + motivos["Cantidad"].tolist()
+
+        df_res = pd.DataFrame(resumen_data)
+        df_res.to_excel(w, sheet_name="RESUMEN", index=False)
+        autoajustar_columnas(w.sheets["RESUMEN"])
+
     return buf.getvalue()
 
 
