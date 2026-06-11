@@ -84,6 +84,7 @@ SUBMENU_DESCUENTO  = "DESCUENTO COMERCIAL"
 SUBMENU_NO_BLOQUEA = "NO BLOQUEA FACTURACION"
 COL_CONCAT         = "Concatenado"
 REPOSICION_KEYWORD = "REPOSICI"   # cubre Reposición / REPOSICION / reposicion
+SUBMENU1_HURTO     = "HURTO SOLUCION"  # identifica tickets de hurto en SAC
 
 MESES_ES = {1:"Enero",2:"Febrero",3:"Marzo",4:"Abril",5:"Mayo",6:"Junio",
             7:"Julio",8:"Agosto",9:"Septiembre",10:"Octubre",11:"Noviembre",12:"Diciembre"}
@@ -259,28 +260,67 @@ def clasificar_nui_sac(grupo: pd.DataFrame, ini: pd.Timestamp,
             "_dias_fact":dias_mes, "_dias_total":dias_mes, "_fc_display":None}
 
 
-def clasificar_nui_hurtos(grupo: pd.DataFrame, ini: pd.Timestamp,
-                           fin: pd.Timestamp, dias_mes: int) -> dict:
+def clasificar_nui_hurtos_con_sac(nui: str,
+                                   df_sac_nui: pd.DataFrame,
+                                   ini: pd.Timestamp,
+                                   fin: pd.Timestamp,
+                                   dias_mes: int) -> dict:
     """
-    Determina la situación de hurto de un NUI en el período.
-    Misma lógica de FechaCierre: si el hurto estaba activo en el mes → bloquea/prorrateo.
+    Determina la facturación de un NUI que aparece en la base de hurtos,
+    cruzando con sus tickets SAC para buscar un ticket de reposición.
+
+    Regla:
+      1. Si NO existe ticket con "REPOSICION" en Concatenado (en SAC) → No facturar
+      2. Si existe ticket de reposición ABIERTO (Semáforo abierto) → No facturar
+      3. Si existe ticket de reposición CERRADO:
+           a. FechaCierre antes del mes o antes del ini → Sí facturar (mes completo)
+           b. FechaCierre dentro del mes               → Prorrateo
+           c. FechaCierre después del mes              → No facturar (cerró luego)
+
+    "Reposición" se identifica por la palabra "REPOSICI" en el campo Concatenado.
     """
-    fc_activos = []
-    for _, r in grupo.iterrows():
-        fce = fc_efectiva("CERRADO", r["_fc"], fin)
-        if fce >= ini:
-            fc_activos.append(fce)
+    REPOS = REPOSICION_KEYWORD
 
-    if not fc_activos:
-        # Todos los hurtos cerraron antes del mes → no aplica
-        return {"_factor":1.0, "_dias_fact":dias_mes, "_tipo":"YA_CERRADO", "_fc":None}
+    # Filtrar tickets del NUI en SAC que tengan "REPOSICION" en Concatenado
+    tickets_repos = df_sac_nui[
+        df_sac_nui["_concat_upper"].str.contains(REPOS, na=False)
+    ]
 
-    fc_max = max(fc_activos)
-    if fc_max >= fin:
-        return {"_factor":0.0, "_dias_fact":0, "_tipo":"COMPLETO", "_fc":None}
-    else:
+    # ── Sin ticket de reposición → No facturar ────────────────────────────
+    if tickets_repos.empty:
+        return {"_factor": 0.0, "_dias_fact": 0, "_tipo": "SIN_REPOSICION", "_fc": None}
+
+    # ── Evaluar estado de los tickets de reposición ───────────────────────
+    # Semáforo normalizado (sin tildes, mayúsculas)
+    abiertos  = tickets_repos[tickets_repos["_semaforo_n"].isin(SEMAFOROS_ABIERTOS)]
+    cerrados  = tickets_repos[~tickets_repos["_semaforo_n"].isin(SEMAFOROS_ABIERTOS)]
+
+    # Si hay reposición abierta → No facturar (aunque también haya cerradas)
+    if not abiertos.empty:
+        return {"_factor": 0.0, "_dias_fact": 0, "_tipo": "REPOS_ABIERTA", "_fc": None}
+
+    # Solo reposiciones cerradas → evaluar FechaCierre
+    if cerrados.empty:
+        return {"_factor": 0.0, "_dias_fact": 0, "_tipo": "SIN_REPOSICION", "_fc": None}
+
+    # Tomar la FechaCierre más reciente entre las reposiciones cerradas
+    fc_max = cerrados["_fc"].dropna().max()
+
+    if pd.isna(fc_max):
+        # Cerrado sin fecha → No facturar por precaución
+        return {"_factor": 0.0, "_dias_fact": 0, "_tipo": "REPOS_SIN_FECHA", "_fc": None}
+
+    if fc_max < ini:
+        # Reposición cerrada ANTES del mes → factura completo
+        return {"_factor": 1.0, "_dias_fact": dias_mes, "_tipo": "REPOS_CERRADA_ANTES", "_fc": fc_max}
+
+    if fc_max <= fin:
+        # Reposición cerrada DENTRO del mes → prorrateo
         f, df_, _ = calcular_prorrateo(fc_max, ini, fin, dias_mes)
-        return {"_factor":f, "_dias_fact":df_, "_tipo":"PARCIAL", "_fc":fc_max}
+        return {"_factor": f, "_dias_fact": df_, "_tipo": "REPOS_CERRADA_EN_MES", "_fc": fc_max}
+
+    # Reposición cerrada DESPUÉS del mes → No facturar (aún estaba abierta en el mes)
+    return {"_factor": 0.0, "_dias_fact": 0, "_tipo": "REPOS_CERRADA_DESPUES", "_fc": fc_max}
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -310,16 +350,31 @@ def consolidar_sac(df_sac: pd.DataFrame, ini: pd.Timestamp,
     return pd.DataFrame(filas)
 
 
-def consolidar_hurtos(df_h: pd.DataFrame, ini: pd.Timestamp,
-                      fin: pd.Timestamp, dias_mes: int) -> dict:
+def consolidar_hurtos(df_h: pd.DataFrame,
+                      df_sac: pd.DataFrame,
+                      ini: pd.Timestamp,
+                      fin: pd.Timestamp,
+                      dias_mes: int) -> dict:
+    """
+    Consolida la base de hurtos cruzando con SAC para verificar
+    la existencia y estado del ticket de reposición por NUI.
+    """
     df = df_h.copy()
     df[COL_NUI] = normalizar_nui(df[COL_NUI])
-    df["_fc"]   = parsear_fechas(df[COL_FC])
     df = df.dropna(subset=[COL_NUI])
 
+    # Preparar SAC con columnas normalizadas necesarias
+    sac = df_sac.copy()
+    sac["_concat_upper"]  = sac[COL_CONCAT].fillna("").astype(str).str.upper()
+    sac["_semaforo_n"]    = normalizar_texto(sac[COL_SEMAFORO])
+    sac["_fc"]            = parsear_fechas(sac[COL_FC])
+
     resultado = {}
-    for nui, grupo in df.groupby(COL_NUI):
-        resultado[nui] = clasificar_nui_hurtos(grupo, ini, fin, dias_mes)
+    for nui in df[COL_NUI].unique():
+        df_sac_nui = sac[sac[COL_NUI] == nui]
+        resultado[nui] = clasificar_nui_hurtos_con_sac(
+            nui, df_sac_nui, ini, fin, dias_mes
+        )
     return resultado
 
 
@@ -385,26 +440,30 @@ def aplicar_reglas(df_usuarios: pd.DataFrame, df_sac_c: pd.DataFrame,
         else:
             if nui in hurtos_info:
                 h = hurtos_info[nui]
-                if h["_tipo"] == "YA_CERRADO":
-                    # Hurto cerrado antes del mes → no aplica
-                    filas.append({"NUI":nui,"Estado de Facturación":"Sí facturar",
-                        "Motivo":"Sin novedades","Fuente de decisión":"Sin coincidencias",
-                        "Factor":1.0,"Días Facturables":dt_,"Días del Mes":dt_,
-                        "Fecha Cierre Bloqueo":"—"})
-                elif h["_tipo"] == "COMPLETO":
-                    filas.append({"NUI":nui,"Estado de Facturación":"No facturar",
-                        "Motivo":"Usuario reportado en hurtos",
-                        "Fuente de decisión":"Hurtos","Factor":0.0,
-                        "Días Facturables":0,"Días del Mes":dt_,"Fecha Cierre Bloqueo":"—"})
-                else:
-                    hf  = h["_factor"]; hdf = h["_dias_fact"]
-                    hfc = h["_fc"]
-                    hfs = hfc.strftime("%d/%m/%Y") if hfc is not None else "—"
-                    est = "Sí facturar" if hf > 0 else "No facturar"
-                    filas.append({"NUI":nui,"Estado de Facturación":est,
-                        "Motivo":"Usuario en hurtos - Ticket cerrado en el mes (prorrateo)",
-                        "Fuente de decisión":"Hurtos","Factor":hf,
-                        "Días Facturables":hdf,"Días del Mes":dt_,"Fecha Cierre Bloqueo":hfs})
+                tipo = h["_tipo"]
+                hf   = h["_factor"]
+                hdf  = h["_dias_fact"]
+                hfc  = h["_fc"]
+                hfs  = hfc.strftime("%d/%m/%Y") if hfc is not None else "—"
+
+                # Motivos por tipo de resolución
+                _motivos = {
+                    "SIN_REPOSICION":        "Hurto sin ticket de reposición",
+                    "REPOS_ABIERTA":         "Hurto - Reposición abierta",
+                    "REPOS_SIN_FECHA":       "Hurto - Reposición sin fecha de cierre",
+                    "REPOS_CERRADA_DESPUES": "Hurto - Reposición cerrada fuera del mes",
+                    "COMPLETO":              "Usuario reportado en hurtos",
+                    "REPOS_CERRADA_ANTES":   "Hurto con reposición cerrada (factura completo)",
+                    "REPOS_CERRADA_EN_MES":  "Hurto con reposición cerrada en el mes (prorrateo)",
+                    "PARCIAL":               "Usuario en hurtos - Ticket cerrado en el mes (prorrateo)",
+                }
+                motivo = _motivos.get(tipo, "Usuario reportado en hurtos")
+                est    = "Sí facturar" if hf > 0 else "No facturar"
+
+                filas.append({"NUI":nui,"Estado de Facturación":est,
+                    "Motivo":motivo,
+                    "Fuente de decisión":"Hurtos","Factor":hf,
+                    "Días Facturables":hdf,"Días del Mes":dt_,"Fecha Cierre Bloqueo":hfs})
             else:
                 filas.append({"NUI":nui,"Estado de Facturación":"Sí facturar",
                     "Motivo":"Sin novedades","Fuente de decisión":"Sin coincidencias",
@@ -627,7 +686,7 @@ if procesar:
             if validar_columnas(df_h, [COL_NUI,COL_FC], "Base Hurtos"):
                 df_h[COL_NUI] = normalizar_nui(df_h[COL_NUI])
                 df_h = df_h.dropna(subset=[COL_NUI])
-                hurtos_info = consolidar_hurtos(df_h, ini_mes, fin_mes, dias_mes)
+                hurtos_info = consolidar_hurtos(df_h, df_s, ini_mes, fin_mes, dias_mes)
                 dup = df_h[df_h.duplicated(subset=[COL_NUI],keep=False)][COL_NUI].nunique()
                 if dup:
                     alertas.append(f"⚠️ **Hurtos** — {dup} NUI duplicados. Se consolidó por NUI.")
