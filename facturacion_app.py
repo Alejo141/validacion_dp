@@ -140,18 +140,15 @@ def reportar_calidad_hurtos(df_h: pd.DataFrame) -> dict:
     nui_unicos      = df_h[COL_NUI].nunique()
     dup_internos    = df_h[df_h.duplicated(subset=[COL_NUI], keep=False)][COL_NUI].nunique()
 
-    # SubMenu3: solo BLOQUEA son hurtos efectivos
-    bloquea_nui  = set(df_h[df_h[COL_SUBMENU3] == SUBMENU_BLOQUEA][COL_NUI].dropna())
-    nobloquea_nui= set(df_h[df_h[COL_SUBMENU3] != SUBMENU_BLOQUEA][COL_NUI].dropna())
-    # NUI con SOLO NO BLOQUEA (nunca aparecen como BLOQUEA)
-    solo_nobloquea = nobloquea_nui - bloquea_nui
+    # Todos los NUI únicos de la base de hurtos son hurtos efectivos
+    todos_nui = set(df_h[COL_NUI].dropna().unique())
 
     return {
         "total_registros": total_registros,
         "nui_unicos": nui_unicos,
         "dup_internos": dup_internos,
-        "bloquea_nui": bloquea_nui,
-        "solo_nobloquea": solo_nobloquea,
+        "bloquea_nui": todos_nui,
+        "solo_nobloquea": set(),
     }
 
 
@@ -215,17 +212,14 @@ def consolidar_sac(df_sac: pd.DataFrame) -> pd.DataFrame:
 
 def obtener_nui_hurtos(df_hurtos: pd.DataFrame) -> set:
     """
-    Retorna el conjunto de NUI efectivos de hurtos.
-    Solo se consideran hurtos los NUI con SubMenu3 = BLOQUEA FACTURACION.
-    NUI con solo NO BLOQUEA FACTURACION se excluyen.
+    Retorna el conjunto de NUI únicos presentes en la base de hurtos.
+    Todo NUI que aparezca en db_hurtos_sac se considera un caso de hurto,
+    independientemente del valor de SubMenu3.
     """
     df = df_hurtos.copy()
-    df[COL_NUI]      = normalizar_nui(df[COL_NUI])
-    df[COL_SUBMENU3] = normalizar_texto(df[COL_SUBMENU3])
+    df[COL_NUI] = normalizar_nui(df[COL_NUI])
     df = df.dropna(subset=[COL_NUI])
-
-    # Solo NUI que tienen al menos un registro BLOQUEA FACTURACION
-    return set(df[df[COL_SUBMENU3] == SUBMENU_BLOQUEA][COL_NUI].dropna().unique())
+    return set(df[COL_NUI].unique())
 
 
 def aplicar_reglas(
@@ -460,19 +454,11 @@ if "df_resultado" in st.session_state:
     alertas = []
 
     if cal_h:
-        dup_int   = cal_h.get("dup_internos", 0)
-        solo_nb   = cal_h.get("solo_nobloquea", set())
-        nui_hurtos_ef = cal_h.get("bloquea_nui", set())
-
+        dup_int = cal_h.get("dup_internos", 0)
         if dup_int:
             alertas.append(
                 f"⚠️ **Hurtos** — {dup_int} NUI duplicados internamente "
                 f"(aparecen más de una vez en la base de hurtos). Se consolidó por NUI."
-            )
-        if solo_nb:
-            alertas.append(
-                f"ℹ️ **Hurtos** — {len(solo_nb)} NUI tienen solo `NO BLOQUEA FACTURACION` "
-                f"en SubMenu3 y fueron **excluidos** como hurtos efectivos."
             )
 
     if cal_s:
