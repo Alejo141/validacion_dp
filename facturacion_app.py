@@ -80,6 +80,9 @@ DATE_FMT     = "%d-%m-%Y"
 SEMAFOROS_ABIERTOS = {"CRITICO", "MODERADO", "LEVE"}
 SUBMENU_BLOQUEA    = "BLOQUEA FACTURACION"
 SUBMENU_DESCUENTO  = "DESCUENTO COMERCIAL"
+SUBMENU_NO_BLOQUEA = "NO BLOQUEA FACTURACION"
+COL_CONCAT         = "Concatenado"
+REPOSICION_KEYWORD = "REPOSICI"   # cubre Reposición / REPOSICION / reposicion
 
 MESES_ES = {1:"Enero",2:"Febrero",3:"Marzo",4:"Abril",5:"Mayo",6:"Junio",
             7:"Julio",8:"Agosto",9:"Septiembre",10:"Octubre",11:"Noviembre",12:"Diciembre"}
@@ -158,30 +161,43 @@ def clasificar_nui_sac(grupo: pd.DataFrame, ini: pd.Timestamp,
     """
     Determina la decisión SAC para un NUI en el período dado.
 
-    Solo generan prorrateo los tickets con SubMenu3 = BLOQUEA FACTURACION
-    o DESCUENTO COMERCIAL. Los tickets con NO BLOQUEA FACTURACION se ignoran
-    para efectos de prorrateo — no afectan la facturación del período.
+        Generan prorrateo:
+      1. SubMenu3=BLOQUEA FACTURACION + cerrado en el mes
+      2. SubMenu3=NO BLOQUEA FACTURACION + cerrado en el mes
+         + campo Concatenado contiene la palabra "Reposición"
 
     Lógica por SubMenu3:
       BLOQUEA FACTURACION  → bloquea o prorrateo según FechaCierre
       DESCUENTO COMERCIAL  → sí facturar (completo o prorrateo)
+      NO BLOQUEA + REPOSICION en Concatenado → prorrateo si cerrado en mes
       Cualquier otro       → se ignora (no afecta facturación)
     """
     activos_bloquea   = []
     activos_descuento = []
+    activos_repos     = []   # NO BLOQUEA + REPOSICION en Concatenado
 
     for _, r in grupo.iterrows():
-        sub = r[COL_SUBMENU3]
-        # Solo procesar BLOQUEA y DESCUENTO; ignorar NO BLOQUEA y otros
-        if sub not in (SUBMENU_BLOQUEA, SUBMENU_DESCUENTO):
-            continue
-        fce = fc_efectiva(r[COL_SEMAFORO], r["_fc"], fin)
+        sub    = r[COL_SUBMENU3]
+        concat = str(r.get(COL_CONCAT, "")).upper()
+        sem    = r[COL_SEMAFORO]
+        fce    = fc_efectiva(sem, r["_fc"], fin)
+
         if fce < ini:
             continue  # cerrado antes del mes, no afecta
+
         if sub == SUBMENU_BLOQUEA:
             activos_bloquea.append(fce)
-        else:
+
+        elif sub == SUBMENU_DESCUENTO:
             activos_descuento.append(fce)
+
+        elif sub == SUBMENU_NO_BLOQUEA:
+            # Solo aplica prorrateo si: cerrado DENTRO del mes Y Concatenado
+            # contiene la palabra "Reposición"
+            if (fce < fin                               # cerrado dentro del mes
+                    and REPOSICION_KEYWORD in concat):  # contiene Reposición
+                activos_repos.append(fce)
+            # Caso contrario (abierto, o sin Reposición): se ignora
 
     # ── Prioridad 1: BLOQUEA ────────────────────────────────────────────────
     if activos_bloquea:
@@ -205,7 +221,15 @@ def clasificar_nui_sac(grupo: pd.DataFrame, ini: pd.Timestamp,
             return {"_dec":"DESCUENTO_PARCIAL", "_factor":f,
                     "_dias_fact":df_, "_dias_total":dt_, "_fc_display":fc_max}
 
-    # ── Sin tickets BLOQUEA/DESCUENTO activos → factura completo ───────────
+    # ── Prioridad 3: NO BLOQUEA + REPOSICION cerrado en el mes → prorrateo ─
+    if activos_repos:
+        # Tomar el cierre más tardío (mayor días bloqueados)
+        fc_max = max(activos_repos)
+        f, df_, dt_ = calcular_prorrateo(fc_max, ini, fin, dias_mes)
+        return {"_dec":"REPOSICION_PARCIAL", "_factor":f,
+                "_dias_fact":df_, "_dias_total":dt_, "_fc_display":fc_max}
+
+    # ── Sin tickets relevantes activos → factura completo ──────────────────
     return {"_dec":"SIN_NOVEDAD_SAC", "_factor":1.0,
             "_dias_fact":dias_mes, "_dias_total":dias_mes, "_fc_display":None}
 
@@ -245,6 +269,11 @@ def consolidar_sac(df_sac: pd.DataFrame, ini: pd.Timestamp,
     df[COL_SEMAFORO] = normalizar_texto(df[COL_SEMAFORO])
     df[COL_SUBMENU3] = normalizar_texto(df[COL_SUBMENU3])
     df["_fc"]        = parsear_fechas(df[COL_FC])
+    # Normalizar Concatenado si existe; si no, columna vacía
+    if COL_CONCAT in df.columns:
+        df[COL_CONCAT] = df[COL_CONCAT].fillna("").astype(str).str.upper()
+    else:
+        df[COL_CONCAT] = ""
     df = df.dropna(subset=[COL_NUI])
 
     filas = []
@@ -316,6 +345,14 @@ def aplicar_reglas(df_usuarios: pd.DataFrame, df_sac_c: pd.DataFrame,
                       else "Ticket cerrado en el mes - Descuento comercial (prorrateo)")
             filas.append({"NUI":nui,"Estado de Facturación":"Sí facturar",
                 "Motivo":motivo,"Fuente de decisión":"SAC","Factor":fac,
+                "Días Facturables":df_,"Días del Mes":dt_,"Fecha Cierre Bloqueo":fcs})
+
+        # ── Regla 2R: NO BLOQUEA + REPOSICION cerrado en mes → prorrateo ────
+        elif dec == "REPOSICION_PARCIAL":
+            estado = "Sí facturar" if fac > 0 else "No facturar"
+            filas.append({"NUI":nui,"Estado de Facturación":estado,
+                "Motivo":"Ticket cerrado en el mes - No bloquea / Reposición (prorrateo)",
+                "Fuente de decisión":"SAC","Factor":fac,
                 "Días Facturables":df_,"Días del Mes":dt_,"Fecha Cierre Bloqueo":fcs})
 
         # ── Reglas 3 y 4: sin decisión SAC → revisar hurtos ──────────────────
@@ -492,7 +529,7 @@ with st.sidebar:
     archivo_usuarios = st.file_uploader("usuarios", type=["xlsx","xls"],
                                         key="usuarios", label_visibility="collapsed")
     st.markdown("#### 🎫 Base SAC")
-    st.caption("Columnas: **NUI · Semaforo · SubMenu3 · FechaCierre**")
+    st.caption("Columnas: **NUI · Semaforo · SubMenu3 · FechaCierre · Concatenado**")
     archivo_sac = st.file_uploader("sac", type=["xlsx","xls"],
                                    key="sac", label_visibility="collapsed")
     st.markdown("#### 🔒 Base Hurtos")
@@ -518,7 +555,7 @@ Para cada ticket se calcula cuándo dejó de estar activo:
 | Activo todo el mes + BLOQUEA | No facturar |
 | Cerrado en el mes + BLOQUEA | Prorrateo |
 | Activo + DESCUENTO | Sí facturar |
-| Cerrado en el mes (cualquier SubMenu3) | Prorrateo |
+| Cerrado en el mes + NO BLOQUEA + Reposición | Prorrateo |
 | Cerrado antes del mes | Sí facturar |
 | En hurtos activo todo el mes | No facturar |
 | En hurtos cerrado en el mes | Prorrateo |
