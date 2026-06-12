@@ -296,6 +296,7 @@ def clasificar_nui_sac(grupo: pd.DataFrame, ini: pd.Timestamp,
 
 def clasificar_nui_hurtos_con_sac(nui: str,
                                    df_sac_nui: pd.DataFrame,
+                                   df_hurto_nui: pd.DataFrame,
                                    ini: pd.Timestamp,
                                    fin: pd.Timestamp,
                                    dias_mes: int) -> dict:
@@ -315,6 +316,17 @@ def clasificar_nui_hurtos_con_sac(nui: str,
     """
     REPOS = REPOSICION_KEYWORD
 
+    # Datos de respaldo tomados de la base de Hurtos (cuando SAC no aporta ticket)
+    if len(df_hurto_nui):
+        fila_h = df_hurto_nui.iloc[0]
+        hurto_ticket_data = {c: str(fila_h.get(c, "")) for c in EXTRA_COLS_TICKET}
+        hurto_submenu2    = str(fila_h.get(COL_SUBMENU2, "")).strip()
+        hurto_seccional   = str(fila_h.get(COL_SECCIONAL, "")).strip()
+    else:
+        hurto_ticket_data = {}
+        hurto_submenu2    = ""
+        hurto_seccional   = ""
+
     # Filtrar tickets del NUI en SAC que tengan "REPOSICION" en Concatenado
     # Excluir tickets con FechaCreacion posterior al fin del mes
     df_sac_valido = df_sac_nui[
@@ -327,7 +339,8 @@ def clasificar_nui_hurtos_con_sac(nui: str,
     # ── Sin ticket de reposición → No facturar ────────────────────────────
     if tickets_repos.empty:
         return {"_factor": 0.0, "_dias_fact": 0, "_tipo": "SIN_REPOSICION", "_fc": None,
-                "_submenu2": "", "_ticket_data": {}}
+                "_submenu2": hurto_submenu2, "_ticket_data": hurto_ticket_data,
+                "_seccional": hurto_seccional}
 
     # ── Evaluar estado de los tickets de reposición ───────────────────────
     # Semáforo normalizado (sin tildes, mayúsculas)
@@ -343,12 +356,13 @@ def clasificar_nui_hurtos_con_sac(nui: str,
         sub2_ab = str(abiertos.iloc[0].get(COL_SUBMENU2, "")).strip()
         ticket_ab = extraer_datos_ticket(abiertos.iloc[0])
         return {"_factor": 0.0, "_dias_fact": 0, "_tipo": "REPOS_ABIERTA", "_fc": None,
-                "_submenu2": sub2_ab, "_ticket_data": ticket_ab}
+                "_submenu2": sub2_ab, "_ticket_data": ticket_ab, "_seccional": hurto_seccional}
 
     # Solo reposiciones cerradas → evaluar FechaCierre
     if cerrados.empty:
         return {"_factor": 0.0, "_dias_fact": 0, "_tipo": "SIN_REPOSICION", "_fc": None,
-                "_submenu2": "", "_ticket_data": {}}
+                "_submenu2": hurto_submenu2, "_ticket_data": hurto_ticket_data,
+                "_seccional": hurto_seccional}
 
     # Tomar la FechaCierre más reciente entre las reposiciones cerradas
     fc_max = cerrados["_fc"].dropna().max()
@@ -362,22 +376,23 @@ def clasificar_nui_hurtos_con_sac(nui: str,
     if pd.isna(fc_max):
         # Cerrado sin fecha → No facturar por precaución
         return {"_factor": 0.0, "_dias_fact": 0, "_tipo": "REPOS_SIN_FECHA", "_fc": None,
-                "_submenu2": submenu2_repos, "_ticket_data": ticket_repos}
+                "_submenu2": submenu2_repos, "_ticket_data": ticket_repos,
+                "_seccional": hurto_seccional}
 
     if fc_max < ini:
         # Reposición cerrada ANTES del mes → factura completo
         return {"_factor": 1.0, "_dias_fact": dias_mes, "_tipo": "REPOS_CERRADA_ANTES", "_fc": fc_max,
-                "_submenu2": sub2_cerr, "_ticket_data": ticket_cerr}
+                "_submenu2": sub2_cerr, "_ticket_data": ticket_cerr, "_seccional": hurto_seccional}
 
     if fc_max <= fin:
         # Reposición cerrada DENTRO del mes → prorrateo
         f, df_, _ = calcular_prorrateo(fc_max, ini, fin, dias_mes)
         return {"_factor": f, "_dias_fact": df_, "_tipo": "REPOS_CERRADA_EN_MES", "_fc": fc_max,
-                "_submenu2": sub2_cerr, "_ticket_data": ticket_cerr}
+                "_submenu2": sub2_cerr, "_ticket_data": ticket_cerr, "_seccional": hurto_seccional}
 
     # Reposición cerrada DESPUÉS del mes → No facturar (aún estaba abierta en el mes)
     return {"_factor": 0.0, "_dias_fact": 0, "_tipo": "REPOS_CERRADA_DESPUES", "_fc": fc_max,
-            "_submenu2": sub2_cerr, "_ticket_data": ticket_cerr}
+            "_submenu2": sub2_cerr, "_ticket_data": ticket_cerr, "_seccional": hurto_seccional}
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -437,6 +452,13 @@ def consolidar_hurtos(df_h: pd.DataFrame,
     df[COL_NUI] = normalizar_nui(df[COL_NUI])
     df = df.dropna(subset=[COL_NUI])
 
+    # Asegurar columnas de respaldo desde hurtos
+    for extra_col in EXTRA_COLS_TICKET + [COL_SUBMENU2, COL_SECCIONAL]:
+        if extra_col not in df.columns:
+            df[extra_col] = ""
+        else:
+            df[extra_col] = df[extra_col].fillna("").astype(str)
+
     # Preparar SAC con columnas normalizadas necesarias
     sac = df_sac.copy()
     sac["_concat_upper"]  = sac[COL_CONCAT].fillna("").astype(str).str.upper()
@@ -455,9 +477,10 @@ def consolidar_hurtos(df_h: pd.DataFrame,
 
     resultado = {}
     for nui in df[COL_NUI].unique():
-        df_sac_nui = sac[sac[COL_NUI] == nui]
+        df_sac_nui   = sac[sac[COL_NUI] == nui]
+        df_hurto_nui = df[df[COL_NUI] == nui]
         resultado[nui] = clasificar_nui_hurtos_con_sac(
-            nui, df_sac_nui, ini, fin, dias_mes
+            nui, df_sac_nui, df_hurto_nui, ini, fin, dias_mes
         )
     return resultado
 
@@ -559,6 +582,8 @@ def aplicar_reglas(df_usuarios: pd.DataFrame, df_sac_c: pd.DataFrame,
                 hfs  = hfc.strftime("%d/%m/%Y") if hfc is not None else "—"
                 hsub2= str(h.get("_submenu2","")).strip()
                 htdata = h.get("_ticket_data", {}) or {}
+                h_seccional = str(h.get("_seccional","")).strip()
+                seccional_final = h_seccional if h_seccional else seccional
 
                 # Motivos por tipo de resolución
                 _motivos = {
@@ -578,7 +603,7 @@ def aplicar_reglas(df_usuarios: pd.DataFrame, df_sac_c: pd.DataFrame,
                 filas.append({"NUI":nui,"Estado de Facturación":est,
                     "Motivo":motivo,
                     "Fuente de decisión":"Hurtos",
-                    "SubMenu2":hsub2 if no_fac else "","NombreSeccionales":seccional,
+                    "SubMenu2":hsub2 if no_fac else "","NombreSeccionales":seccional_final,
                     **_extra_cols(htdata, no_fac),
                     "Factor":hf,
                     "Días Facturables":hdf,"Días del Mes":dt_,"Fecha Cierre Bloqueo":hfs})
