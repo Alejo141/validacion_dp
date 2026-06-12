@@ -542,11 +542,10 @@ def aplicar_reglas(df_usuarios: pd.DataFrame, df_sac_c: pd.DataFrame,
         # ── Regla 1P: SAC BLOQUEA parcial (prorrateo) ────────────────────────
         elif dec == "BLOQUEA_PARCIAL":
             estado = "Sí facturar" if fac > 0 else "No facturar"
-            no_fac = estado=="No facturar"
             filas.append({"NUI":nui,"Estado de Facturación":estado,
                 "Motivo":"Ticket cerrado en el mes - Bloquea facturación (prorrateo)",
-                "Fuente de decisión":"SAC","SubMenu2":sub2 if no_fac else "","NombreSeccionales":seccional,
-                **_extra_cols(tdata, no_fac),
+                "Fuente de decisión":"SAC","SubMenu2":sub2,"NombreSeccionales":seccional,
+                **_extra_cols(tdata, True),
                 "Factor":fac,
                 "Días Facturables":df_,"Días del Mes":dt_,"Fecha Cierre Bloqueo":fcs})
 
@@ -563,11 +562,10 @@ def aplicar_reglas(df_usuarios: pd.DataFrame, df_sac_c: pd.DataFrame,
         # ── Regla 2R: NO BLOQUEA + REPOSICION cerrado en mes → prorrateo ────
         elif dec == "REPOSICION_PARCIAL":
             estado = "Sí facturar" if fac > 0 else "No facturar"
-            no_fac = estado=="No facturar"
             filas.append({"NUI":nui,"Estado de Facturación":estado,
                 "Motivo":"Ticket cerrado en el mes - No bloquea / Reposición (prorrateo)",
-                "Fuente de decisión":"SAC","SubMenu2":sub2 if no_fac else "","NombreSeccionales":seccional,
-                **_extra_cols(tdata, no_fac),
+                "Fuente de decisión":"SAC","SubMenu2":sub2,"NombreSeccionales":seccional,
+                **_extra_cols(tdata, True),
                 "Factor":fac,
                 "Días Facturables":df_,"Días del Mes":dt_,"Fecha Cierre Bloqueo":fcs})
 
@@ -599,12 +597,14 @@ def aplicar_reglas(df_usuarios: pd.DataFrame, df_sac_c: pd.DataFrame,
                 motivo = _motivos.get(tipo, "Usuario reportado en hurtos")
                 est    = "Sí facturar" if hf > 0 else "No facturar"
                 no_fac = est=="No facturar"
+                es_prorrateo = 0.0 < hf < 1.0
+                incluir = no_fac or es_prorrateo
 
                 filas.append({"NUI":nui,"Estado de Facturación":est,
                     "Motivo":motivo,
                     "Fuente de decisión":"Hurtos",
-                    "SubMenu2":hsub2 if no_fac else "","NombreSeccionales":seccional_final,
-                    **_extra_cols(htdata, no_fac),
+                    "SubMenu2":hsub2 if incluir else "","NombreSeccionales":seccional_final,
+                    **_extra_cols(htdata, incluir),
                     "Factor":hf,
                     "Días Facturables":hdf,"Días del Mes":dt_,"Fecha Cierre Bloqueo":hfs})
             else:
