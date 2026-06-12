@@ -75,6 +75,7 @@ COL_NUI      = "NUI"
 COL_SEMAFORO = "Semaforo"
 COL_SUBMENU3 = "SubMenu3"
 COL_SUBMENU2 = "SubMenu2"
+COL_SECCIONAL = "NombreSeccionales"
 COL_FC       = "FechaCierre"
 COL_FECHA_CREACION = "FechaCreacion"
 DATE_FMT     = "%d-%m-%Y"
@@ -387,6 +388,12 @@ def consolidar_sac(df_sac: pd.DataFrame, ini: pd.Timestamp,
         info = clasificar_nui_sac(grupo, ini, fin, dias_mes,
                                   col_creacion=COL_FECHA_CREACION)
         info["NUI"] = nui
+        # Capturar NombreSeccionales (mismo valor para todo el NUI)
+        if COL_SECCIONAL in grupo.columns:
+            vals = grupo[COL_SECCIONAL].dropna()
+            info["_seccional"] = vals.iloc[0] if len(vals) else ""
+        else:
+            info["_seccional"] = ""
         filas.append(info)
     return pd.DataFrame(filas)
 
@@ -443,6 +450,9 @@ def aplicar_reglas(df_usuarios: pd.DataFrame, df_sac_c: pd.DataFrame,
     if "_submenu2" not in df.columns:
         df["_submenu2"] = ""
     df["_submenu2"] = df["_submenu2"].fillna("")
+    if "_seccional" not in df.columns:
+        df["_seccional"] = ""
+    df["_seccional"] = df["_seccional"].fillna("")
 
     filas = []
     for _, row in df.iterrows():
@@ -454,12 +464,13 @@ def aplicar_reglas(df_usuarios: pd.DataFrame, df_sac_c: pd.DataFrame,
         fcd  = row["_fc_display"]
         fcs  = fcd.strftime("%d/%m/%Y") if pd.notna(fcd) and fcd is not None else "—"
         sub2 = str(row["_submenu2"]).strip()
+        seccional = str(row["_seccional"]).strip()
 
         # ── Regla 1: SAC BLOQUEA completo ────────────────────────────────────
         if dec == "BLOQUEA":
             filas.append({"NUI":nui,"Estado de Facturación":"No facturar",
                 "Motivo":"Ticket abierto - Bloquea facturación",
-                "Fuente de decisión":"SAC","SubMenu2":sub2,"Factor":0.0,
+                "Fuente de decisión":"SAC","SubMenu2":sub2,"NombreSeccionales":seccional,"Factor":0.0,
                 "Días Facturables":0,"Días del Mes":dt_,"Fecha Cierre Bloqueo":"—"})
 
         # ── Regla 1P: SAC BLOQUEA parcial (prorrateo) ────────────────────────
@@ -467,7 +478,7 @@ def aplicar_reglas(df_usuarios: pd.DataFrame, df_sac_c: pd.DataFrame,
             estado = "Sí facturar" if fac > 0 else "No facturar"
             filas.append({"NUI":nui,"Estado de Facturación":estado,
                 "Motivo":"Ticket cerrado en el mes - Bloquea facturación (prorrateo)",
-                "Fuente de decisión":"SAC","SubMenu2":sub2 if estado=="No facturar" else "","Factor":fac,
+                "Fuente de decisión":"SAC","SubMenu2":sub2 if estado=="No facturar" else "","NombreSeccionales":seccional,"Factor":fac,
                 "Días Facturables":df_,"Días del Mes":dt_,"Fecha Cierre Bloqueo":fcs})
 
         # ── Regla 2: SAC DESCUENTO ───────────────────────────────────────────
@@ -475,7 +486,7 @@ def aplicar_reglas(df_usuarios: pd.DataFrame, df_sac_c: pd.DataFrame,
             motivo = ("Ticket abierto - Descuento comercial" if dec=="DESCUENTO"
                       else "Ticket cerrado en el mes - Descuento comercial (prorrateo)")
             filas.append({"NUI":nui,"Estado de Facturación":"Sí facturar",
-                "Motivo":motivo,"Fuente de decisión":"SAC","SubMenu2":"","Factor":fac,
+                "Motivo":motivo,"Fuente de decisión":"SAC","SubMenu2":"","NombreSeccionales":seccional,"Factor":fac,
                 "Días Facturables":df_,"Días del Mes":dt_,"Fecha Cierre Bloqueo":fcs})
 
         # ── Regla 2R: NO BLOQUEA + REPOSICION cerrado en mes → prorrateo ────
@@ -483,7 +494,7 @@ def aplicar_reglas(df_usuarios: pd.DataFrame, df_sac_c: pd.DataFrame,
             estado = "Sí facturar" if fac > 0 else "No facturar"
             filas.append({"NUI":nui,"Estado de Facturación":estado,
                 "Motivo":"Ticket cerrado en el mes - No bloquea / Reposición (prorrateo)",
-                "Fuente de decisión":"SAC","SubMenu2":sub2 if estado=="No facturar" else "","Factor":fac,
+                "Fuente de decisión":"SAC","SubMenu2":sub2 if estado=="No facturar" else "","NombreSeccionales":seccional,"Factor":fac,
                 "Días Facturables":df_,"Días del Mes":dt_,"Fecha Cierre Bloqueo":fcs})
 
         # ── Reglas 3 y 4: sin decisión SAC → revisar hurtos ──────────────────
@@ -514,12 +525,12 @@ def aplicar_reglas(df_usuarios: pd.DataFrame, df_sac_c: pd.DataFrame,
                 filas.append({"NUI":nui,"Estado de Facturación":est,
                     "Motivo":motivo,
                     "Fuente de decisión":"Hurtos",
-                    "SubMenu2":hsub2 if est=="No facturar" else "","Factor":hf,
+                    "SubMenu2":hsub2 if est=="No facturar" else "","NombreSeccionales":seccional,"Factor":hf,
                     "Días Facturables":hdf,"Días del Mes":dt_,"Fecha Cierre Bloqueo":hfs})
             else:
                 filas.append({"NUI":nui,"Estado de Facturación":"Sí facturar",
                     "Motivo":"Sin novedades","Fuente de decisión":"Sin coincidencias",
-                    "SubMenu2":"","Factor":1.0,"Días Facturables":dt_,"Días del Mes":dt_,
+                    "SubMenu2":"","NombreSeccionales":seccional,"Factor":1.0,"Días Facturables":dt_,"Días del Mes":dt_,
                     "Fecha Cierre Bloqueo":"—"})
 
     return pd.DataFrame(filas)
