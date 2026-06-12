@@ -74,6 +74,7 @@ st.markdown("""
 COL_NUI      = "NUI"
 COL_SEMAFORO = "Semaforo"
 COL_SUBMENU3 = "SubMenu3"
+COL_SUBMENU2 = "SubMenu2"
 COL_FC       = "FechaCierre"
 COL_FECHA_CREACION = "FechaCreacion"
 DATE_FMT     = "%d-%m-%Y"
@@ -175,12 +176,13 @@ def clasificar_nui_sac(grupo: pd.DataFrame, ini: pd.Timestamp,
       NO BLOQUEA + REPOSICION en Concatenado → prorrateo si cerrado en mes
       Cualquier otro       → se ignora (no afecta facturación)
     """
-    activos_bloquea   = []  # lista de (fc_inicio_bloqueo, fc_fin_bloqueo)
-    activos_descuento = []
-    activos_repos     = []   # NO BLOQUEA + REPOSICION en Concatenado
+    activos_bloquea   = []  # lista de (fc_inicio_bloqueo, fc_fin_bloqueo, submenu2)
+    activos_descuento = []  # lista de (fc_fin, submenu2)
+    activos_repos     = []  # lista de (fc_fin, submenu2) NO BLOQUEA + REPOSICION
 
     for _, r in grupo.iterrows():
         sub    = r[COL_SUBMENU3]
+        sub2   = str(r.get(COL_SUBMENU2, "")).strip()
         concat = str(r.get(COL_CONCAT, "")).upper()
         sem    = r[COL_SEMAFORO]
 
@@ -207,17 +209,17 @@ def clasificar_nui_sac(grupo: pd.DataFrame, ini: pd.Timestamp,
             else:
                 # Ticket existía antes del mes → bloquea desde el primer día
                 inicio_bloqueo = ini
-            activos_bloquea.append((inicio_bloqueo, fce))
+            activos_bloquea.append((inicio_bloqueo, fce, sub2))
 
         elif sub == SUBMENU_DESCUENTO:
-            activos_descuento.append(fce)
+            activos_descuento.append((fce, sub2))
 
         elif sub == SUBMENU_NO_BLOQUEA:
             # Solo aplica prorrateo si: cerrado DENTRO del mes Y Concatenado
             # contiene la palabra "Reposición"
             if (fce < fin                               # cerrado dentro del mes
                     and REPOSICION_KEYWORD in concat):  # contiene Reposición
-                activos_repos.append(fce)
+                activos_repos.append((fce, sub2))
             # Caso contrario (abierto, o sin Reposición): se ignora
 
     # ── Prioridad 1: BLOQUEA ────────────────────────────────────────────────
@@ -227,11 +229,14 @@ def clasificar_nui_sac(grupo: pd.DataFrame, ini: pd.Timestamp,
         # Si cualquier ticket empezó antes o en ini_mes y sigue abierto → bloqueo completo.
         inicio_min = min(t[0] for t in activos_bloquea)  # inicio de bloqueo más temprano
         fc_max     = max(t[1] for t in activos_bloquea)  # fin de bloqueo más tardío
+        # SubMenu2 del ticket con el cierre más tardío (el más representativo)
+        submenu2   = next(t[2] for t in activos_bloquea if t[1] == fc_max)
 
         if inicio_min <= ini and fc_max >= fin:
             # Bloqueado todo el mes
             return {"_dec":"BLOQUEA", "_factor":0.0,
-                    "_dias_fact":0, "_dias_total":dias_mes, "_fc_display":None}
+                    "_dias_fact":0, "_dias_total":dias_mes, "_fc_display":None,
+                    "_submenu2":submenu2}
         else:
             # Calcular días efectivamente bloqueados en el mes
             inicio_bloq_efectivo = max(inicio_min, ini)
@@ -242,30 +247,36 @@ def clasificar_nui_sac(grupo: pd.DataFrame, ini: pd.Timestamp,
             factor = round(dias_fact / dias_mes, 6)
             return {"_dec":"BLOQUEA_PARCIAL", "_factor":factor,
                     "_dias_fact":int(dias_fact), "_dias_total":dias_mes,
-                    "_fc_display":fin_bloq_efectivo}
+                    "_fc_display":fin_bloq_efectivo, "_submenu2":submenu2}
 
     # ── Prioridad 2: DESCUENTO ──────────────────────────────────────────────
     if activos_descuento:
-        fc_max = max(activos_descuento)
+        fc_max   = max(t[0] for t in activos_descuento)
+        submenu2 = next(t[1] for t in activos_descuento if t[0] == fc_max)
         if fc_max >= fin:
             return {"_dec":"DESCUENTO", "_factor":1.0,
-                    "_dias_fact":dias_mes, "_dias_total":dias_mes, "_fc_display":None}
+                    "_dias_fact":dias_mes, "_dias_total":dias_mes, "_fc_display":None,
+                    "_submenu2":submenu2}
         else:
             f, df_, dt_ = calcular_prorrateo(fc_max, ini, fin, dias_mes)
             return {"_dec":"DESCUENTO_PARCIAL", "_factor":f,
-                    "_dias_fact":df_, "_dias_total":dt_, "_fc_display":fc_max}
+                    "_dias_fact":df_, "_dias_total":dt_, "_fc_display":fc_max,
+                    "_submenu2":submenu2}
 
     # ── Prioridad 3: NO BLOQUEA + REPOSICION cerrado en el mes → prorrateo ─
     if activos_repos:
         # Tomar el cierre más tardío (mayor días bloqueados)
-        fc_max = max(activos_repos)
+        fc_max   = max(t[0] for t in activos_repos)
+        submenu2 = next(t[1] for t in activos_repos if t[0] == fc_max)
         f, df_, dt_ = calcular_prorrateo(fc_max, ini, fin, dias_mes)
         return {"_dec":"REPOSICION_PARCIAL", "_factor":f,
-                "_dias_fact":df_, "_dias_total":dt_, "_fc_display":fc_max}
+                "_dias_fact":df_, "_dias_total":dt_, "_fc_display":fc_max,
+                "_submenu2":submenu2}
 
     # ── Sin tickets relevantes activos → factura completo ──────────────────
     return {"_dec":"SIN_NOVEDAD_SAC", "_factor":1.0,
-            "_dias_fact":dias_mes, "_dias_total":dias_mes, "_fc_display":None}
+            "_dias_fact":dias_mes, "_dias_total":dias_mes, "_fc_display":None,
+            "_submenu2":""}
 
 
 def clasificar_nui_hurtos_con_sac(nui: str,
@@ -300,39 +311,52 @@ def clasificar_nui_hurtos_con_sac(nui: str,
 
     # ── Sin ticket de reposición → No facturar ────────────────────────────
     if tickets_repos.empty:
-        return {"_factor": 0.0, "_dias_fact": 0, "_tipo": "SIN_REPOSICION", "_fc": None}
+        return {"_factor": 0.0, "_dias_fact": 0, "_tipo": "SIN_REPOSICION", "_fc": None,
+                "_submenu2": ""}
 
     # ── Evaluar estado de los tickets de reposición ───────────────────────
     # Semáforo normalizado (sin tildes, mayúsculas)
     abiertos  = tickets_repos[tickets_repos["_semaforo_n"].isin(SEMAFOROS_ABIERTOS)]
     cerrados  = tickets_repos[~tickets_repos["_semaforo_n"].isin(SEMAFOROS_ABIERTOS)]
 
+    # SubMenu2 representativo (del primer ticket de reposición encontrado)
+    submenu2_repos = str(tickets_repos.iloc[0].get(COL_SUBMENU2, "")).strip()
+
     # Si hay reposición abierta → No facturar (aunque también haya cerradas)
     if not abiertos.empty:
-        return {"_factor": 0.0, "_dias_fact": 0, "_tipo": "REPOS_ABIERTA", "_fc": None}
+        sub2_ab = str(abiertos.iloc[0].get(COL_SUBMENU2, "")).strip()
+        return {"_factor": 0.0, "_dias_fact": 0, "_tipo": "REPOS_ABIERTA", "_fc": None,
+                "_submenu2": sub2_ab}
 
     # Solo reposiciones cerradas → evaluar FechaCierre
     if cerrados.empty:
-        return {"_factor": 0.0, "_dias_fact": 0, "_tipo": "SIN_REPOSICION", "_fc": None}
+        return {"_factor": 0.0, "_dias_fact": 0, "_tipo": "SIN_REPOSICION", "_fc": None,
+                "_submenu2": ""}
 
     # Tomar la FechaCierre más reciente entre las reposiciones cerradas
     fc_max = cerrados["_fc"].dropna().max()
+    fila_max = cerrados[cerrados["_fc"] == fc_max]
+    sub2_cerr = str(fila_max.iloc[0].get(COL_SUBMENU2, "")).strip() if len(fila_max) else submenu2_repos
 
     if pd.isna(fc_max):
         # Cerrado sin fecha → No facturar por precaución
-        return {"_factor": 0.0, "_dias_fact": 0, "_tipo": "REPOS_SIN_FECHA", "_fc": None}
+        return {"_factor": 0.0, "_dias_fact": 0, "_tipo": "REPOS_SIN_FECHA", "_fc": None,
+                "_submenu2": submenu2_repos}
 
     if fc_max < ini:
         # Reposición cerrada ANTES del mes → factura completo
-        return {"_factor": 1.0, "_dias_fact": dias_mes, "_tipo": "REPOS_CERRADA_ANTES", "_fc": fc_max}
+        return {"_factor": 1.0, "_dias_fact": dias_mes, "_tipo": "REPOS_CERRADA_ANTES", "_fc": fc_max,
+                "_submenu2": sub2_cerr}
 
     if fc_max <= fin:
         # Reposición cerrada DENTRO del mes → prorrateo
         f, df_, _ = calcular_prorrateo(fc_max, ini, fin, dias_mes)
-        return {"_factor": f, "_dias_fact": df_, "_tipo": "REPOS_CERRADA_EN_MES", "_fc": fc_max}
+        return {"_factor": f, "_dias_fact": df_, "_tipo": "REPOS_CERRADA_EN_MES", "_fc": fc_max,
+                "_submenu2": sub2_cerr}
 
     # Reposición cerrada DESPUÉS del mes → No facturar (aún estaba abierta en el mes)
-    return {"_factor": 0.0, "_dias_fact": 0, "_tipo": "REPOS_CERRADA_DESPUES", "_fc": fc_max}
+    return {"_factor": 0.0, "_dias_fact": 0, "_tipo": "REPOS_CERRADA_DESPUES", "_fc": fc_max,
+            "_submenu2": sub2_cerr}
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -351,6 +375,11 @@ def consolidar_sac(df_sac: pd.DataFrame, ini: pd.Timestamp,
         df[COL_CONCAT] = df[COL_CONCAT].fillna("").astype(str).str.upper()
     else:
         df[COL_CONCAT] = ""
+    # Asegurar columna SubMenu2 (opcional)
+    if COL_SUBMENU2 not in df.columns:
+        df[COL_SUBMENU2] = ""
+    else:
+        df[COL_SUBMENU2] = df[COL_SUBMENU2].fillna("").astype(str)
     df = df.dropna(subset=[COL_NUI])
 
     filas = []
@@ -381,6 +410,10 @@ def consolidar_hurtos(df_h: pd.DataFrame,
     sac["_semaforo_n"]    = normalizar_texto(sac[COL_SEMAFORO])
     sac["_fc"]            = parsear_fechas(sac[COL_FC])
     sac["_fc_creac"]      = parsear_fechas(sac[COL_FECHA_CREACION])
+    if COL_SUBMENU2 not in sac.columns:
+        sac[COL_SUBMENU2] = ""
+    else:
+        sac[COL_SUBMENU2] = sac[COL_SUBMENU2].fillna("").astype(str)
 
     resultado = {}
     for nui in df[COL_NUI].unique():
@@ -407,6 +440,9 @@ def aplicar_reglas(df_usuarios: pd.DataFrame, df_sac_c: pd.DataFrame,
     df["_dias_fact"] = df["_dias_fact"].fillna(dias_mes)
     df["_dias_total"]= df["_dias_total"].fillna(dias_mes)
     df["_fc_display"]= df["_fc_display"].where(df["_fc_display"].notna(), None)
+    if "_submenu2" not in df.columns:
+        df["_submenu2"] = ""
+    df["_submenu2"] = df["_submenu2"].fillna("")
 
     filas = []
     for _, row in df.iterrows():
@@ -417,12 +453,13 @@ def aplicar_reglas(df_usuarios: pd.DataFrame, df_sac_c: pd.DataFrame,
         dt_  = int(row["_dias_total"])
         fcd  = row["_fc_display"]
         fcs  = fcd.strftime("%d/%m/%Y") if pd.notna(fcd) and fcd is not None else "—"
+        sub2 = str(row["_submenu2"]).strip()
 
         # ── Regla 1: SAC BLOQUEA completo ────────────────────────────────────
         if dec == "BLOQUEA":
             filas.append({"NUI":nui,"Estado de Facturación":"No facturar",
                 "Motivo":"Ticket abierto - Bloquea facturación",
-                "Fuente de decisión":"SAC","Factor":0.0,
+                "Fuente de decisión":"SAC","SubMenu2":sub2,"Factor":0.0,
                 "Días Facturables":0,"Días del Mes":dt_,"Fecha Cierre Bloqueo":"—"})
 
         # ── Regla 1P: SAC BLOQUEA parcial (prorrateo) ────────────────────────
@@ -430,7 +467,7 @@ def aplicar_reglas(df_usuarios: pd.DataFrame, df_sac_c: pd.DataFrame,
             estado = "Sí facturar" if fac > 0 else "No facturar"
             filas.append({"NUI":nui,"Estado de Facturación":estado,
                 "Motivo":"Ticket cerrado en el mes - Bloquea facturación (prorrateo)",
-                "Fuente de decisión":"SAC","Factor":fac,
+                "Fuente de decisión":"SAC","SubMenu2":sub2 if estado=="No facturar" else "","Factor":fac,
                 "Días Facturables":df_,"Días del Mes":dt_,"Fecha Cierre Bloqueo":fcs})
 
         # ── Regla 2: SAC DESCUENTO ───────────────────────────────────────────
@@ -438,7 +475,7 @@ def aplicar_reglas(df_usuarios: pd.DataFrame, df_sac_c: pd.DataFrame,
             motivo = ("Ticket abierto - Descuento comercial" if dec=="DESCUENTO"
                       else "Ticket cerrado en el mes - Descuento comercial (prorrateo)")
             filas.append({"NUI":nui,"Estado de Facturación":"Sí facturar",
-                "Motivo":motivo,"Fuente de decisión":"SAC","Factor":fac,
+                "Motivo":motivo,"Fuente de decisión":"SAC","SubMenu2":"","Factor":fac,
                 "Días Facturables":df_,"Días del Mes":dt_,"Fecha Cierre Bloqueo":fcs})
 
         # ── Regla 2R: NO BLOQUEA + REPOSICION cerrado en mes → prorrateo ────
@@ -446,7 +483,7 @@ def aplicar_reglas(df_usuarios: pd.DataFrame, df_sac_c: pd.DataFrame,
             estado = "Sí facturar" if fac > 0 else "No facturar"
             filas.append({"NUI":nui,"Estado de Facturación":estado,
                 "Motivo":"Ticket cerrado en el mes - No bloquea / Reposición (prorrateo)",
-                "Fuente de decisión":"SAC","Factor":fac,
+                "Fuente de decisión":"SAC","SubMenu2":sub2 if estado=="No facturar" else "","Factor":fac,
                 "Días Facturables":df_,"Días del Mes":dt_,"Fecha Cierre Bloqueo":fcs})
 
         # ── Reglas 3 y 4: sin decisión SAC → revisar hurtos ──────────────────
@@ -458,6 +495,7 @@ def aplicar_reglas(df_usuarios: pd.DataFrame, df_sac_c: pd.DataFrame,
                 hdf  = h["_dias_fact"]
                 hfc  = h["_fc"]
                 hfs  = hfc.strftime("%d/%m/%Y") if hfc is not None else "—"
+                hsub2= str(h.get("_submenu2","")).strip()
 
                 # Motivos por tipo de resolución
                 _motivos = {
@@ -475,12 +513,13 @@ def aplicar_reglas(df_usuarios: pd.DataFrame, df_sac_c: pd.DataFrame,
 
                 filas.append({"NUI":nui,"Estado de Facturación":est,
                     "Motivo":motivo,
-                    "Fuente de decisión":"Hurtos","Factor":hf,
+                    "Fuente de decisión":"Hurtos",
+                    "SubMenu2":hsub2 if est=="No facturar" else "","Factor":hf,
                     "Días Facturables":hdf,"Días del Mes":dt_,"Fecha Cierre Bloqueo":hfs})
             else:
                 filas.append({"NUI":nui,"Estado de Facturación":"Sí facturar",
                     "Motivo":"Sin novedades","Fuente de decisión":"Sin coincidencias",
-                    "Factor":1.0,"Días Facturables":dt_,"Días del Mes":dt_,
+                    "SubMenu2":"","Factor":1.0,"Días Facturables":dt_,"Días del Mes":dt_,
                     "Fecha Cierre Bloqueo":"—"})
 
     return pd.DataFrame(filas)
@@ -627,7 +666,7 @@ with st.sidebar:
     archivo_usuarios = st.file_uploader("usuarios", type=["xlsx","xls"],
                                         key="usuarios", label_visibility="collapsed")
     st.markdown("#### 🎫 Base SAC")
-    st.caption("Columnas: **NUI · Semaforo · SubMenu3 · FechaCierre · Concatenado**")
+    st.caption("Columnas: **NUI · Semaforo · SubMenu2 · SubMenu3 · FechaCierre · Concatenado**")
     archivo_sac = st.file_uploader("sac", type=["xlsx","xls"],
                                    key="sac", label_visibility="collapsed")
     st.markdown("#### 🔒 Base Hurtos")
