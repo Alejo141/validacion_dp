@@ -74,6 +74,7 @@ st.markdown("""
 COL_NUI      = "NUI"
 COL_SEMAFORO = "Semaforo"
 COL_SUBMENU3 = "SubMenu3"
+COL_SUBMENU1 = "SubMenu1"
 COL_SUBMENU2 = "SubMenu2"
 COL_SECCIONAL = "NombreSeccionales"
 COL_ID_TICKET = "Id_Tickets"
@@ -91,6 +92,7 @@ SUBMENU_DESCUENTO  = "DESCUENTO COMERCIAL"
 SUBMENU_NO_BLOQUEA = "NO BLOQUEA FACTURACION"
 COL_CONCAT         = "Concatenado"
 REPOSICION_KEYWORD = "REPOSICI"   # cubre Reposición / REPOSICION / reposicion
+DANO_KEYWORD        = "DANO"       # SubMenu1 normalizado (sin tilde) para "DAÑO"
 SUBMENU1_HURTO     = "HURTO SOLUCION"  # identifica tickets de hurto en SAC
 
 MESES_ES = {1:"Enero",2:"Febrero",3:"Marzo",4:"Abril",5:"Mayo",6:"Junio",
@@ -190,9 +192,11 @@ def clasificar_nui_sac(grupo: pd.DataFrame, ini: pd.Timestamp,
     activos_bloquea   = []  # lista de (fc_inicio_bloqueo, fc_fin_bloqueo, submenu2)
     activos_descuento = []  # lista de (fc_fin, submenu2)
     activos_repos     = []  # lista de (fc_fin, submenu2) NO BLOQUEA + REPOSICION
+    activos_dano      = []  # lista de (fc_inicio, fc_fin, submenu2, ticket_data) NO BLOQUEA + DAÑO (técnico)
 
     for _, r in grupo.iterrows():
         sub    = r[COL_SUBMENU3]
+        sub1   = quitar_tildes(str(r.get(COL_SUBMENU1, "")).strip().upper())
         sub2   = str(r.get(COL_SUBMENU2, "")).strip()
         concat = str(r.get(COL_CONCAT, "")).upper()
         sem    = r[COL_SEMAFORO]
@@ -226,12 +230,20 @@ def clasificar_nui_sac(grupo: pd.DataFrame, ini: pd.Timestamp,
             activos_descuento.append((fce, sub2, extraer_datos_ticket(r)))
 
         elif sub == SUBMENU_NO_BLOQUEA:
-            # Solo aplica prorrateo si: cerrado DENTRO del mes Y Concatenado
-            # contiene la palabra "Reposición"
-            if (fce < fin                               # cerrado dentro del mes
-                    and REPOSICION_KEYWORD in concat):  # contiene Reposición
+            # Caso A: contiene "Reposición" en Concatenado → prorrateo si cerrado en mes
+            if fce < fin and REPOSICION_KEYWORD in concat:
                 activos_repos.append((fce, sub2, extraer_datos_ticket(r)))
-            # Caso contrario (abierto, o sin Reposición): se ignora
+            # Caso B: SubMenu1 = DAÑO (soporte técnico) cerrado dentro del mes
+            # → puede haber estado abierto desde meses anteriores; prorratea
+            # igual que BLOQUEA: desde ini_mes (o FechaCreacion si es del mes) hasta FechaCierre
+            elif fce < fin and sub1 == DANO_KEYWORD:
+                fcreac = parsear_fechas(pd.Series([r.get(col_creacion, "")])).iloc[0]
+                if pd.notna(fcreac) and fcreac > ini:
+                    inicio_dano = max(fcreac, ini)
+                else:
+                    inicio_dano = ini
+                activos_dano.append((inicio_dano, fce, sub2, extraer_datos_ticket(r)))
+            # Caso contrario (abierto, o sin Reposición/Daño): se ignora
 
     # ── Prioridad 1: BLOQUEA ────────────────────────────────────────────────
     if activos_bloquea:
@@ -287,6 +299,26 @@ def clasificar_nui_sac(grupo: pd.DataFrame, ini: pd.Timestamp,
         return {"_dec":"REPOSICION_PARCIAL", "_factor":f,
                 "_dias_fact":df_, "_dias_total":dt_, "_fc_display":fc_max,
                 "_submenu2":submenu2, "_ticket_data":ticket_data}
+
+    # ── Prioridad 4: NO BLOQUEA + DAÑO (técnico) cerrado en el mes → prorrateo
+    # Puede haber estado abierto desde meses anteriores; se prorratea igual
+    # que BLOQUEA: desde el inicio efectivo del bloqueo hasta FechaCierre.
+    if activos_dano:
+        inicio_min  = min(t[0] for t in activos_dano)
+        fc_max      = max(t[1] for t in activos_dano)
+        submenu2    = next(t[2] for t in activos_dano if t[1] == fc_max)
+        ticket_data = next(t[3] for t in activos_dano if t[1] == fc_max)
+
+        inicio_bloq_efectivo = max(inicio_min, ini)
+        fin_bloq_efectivo    = min(fc_max, fin)
+        dias_bloqueados      = (fin_bloq_efectivo - inicio_bloq_efectivo).days + 1
+        dias_fact            = dias_mes - dias_bloqueados
+        if dias_fact < 0: dias_fact = 0
+        factor = round(dias_fact / dias_mes, 6)
+        return {"_dec":"DANO_PARCIAL", "_factor":factor,
+                "_dias_fact":int(dias_fact), "_dias_total":dias_mes,
+                "_fc_display":fin_bloq_efectivo, "_submenu2":submenu2,
+                "_ticket_data":ticket_data}
 
     # ── Sin tickets relevantes activos → factura completo ──────────────────
     return {"_dec":"SIN_NOVEDAD_SAC", "_factor":1.0,
@@ -416,6 +448,11 @@ def consolidar_sac(df_sac: pd.DataFrame, ini: pd.Timestamp,
         df[COL_SUBMENU2] = ""
     else:
         df[COL_SUBMENU2] = df[COL_SUBMENU2].fillna("").astype(str)
+    # Asegurar columna SubMenu1 (opcional, usada para identificar DAÑO)
+    if COL_SUBMENU1 not in df.columns:
+        df[COL_SUBMENU1] = ""
+    else:
+        df[COL_SUBMENU1] = df[COL_SUBMENU1].fillna("").astype(str)
     # Asegurar columnas extra para reporte de tickets (opcionales)
     for extra_col in EXTRA_COLS_TICKET:
         if extra_col not in df.columns:
@@ -564,6 +601,16 @@ def aplicar_reglas(df_usuarios: pd.DataFrame, df_sac_c: pd.DataFrame,
             estado = "Sí facturar" if fac > 0 else "No facturar"
             filas.append({"NUI":nui,"Estado de Facturación":estado,
                 "Motivo":"Ticket cerrado en el mes - No bloquea / Reposición (prorrateo)",
+                "Fuente de decisión":"SAC","SubMenu2":sub2,"NombreSeccionales":seccional,
+                **_extra_cols(tdata, True),
+                "Factor":fac,
+                "Días Facturables":df_,"Días del Mes":dt_,"Fecha Cierre Bloqueo":fcs})
+
+        # ── Regla 2D: NO BLOQUEA + DAÑO (técnico) cerrado en mes → prorrateo ─
+        elif dec == "DANO_PARCIAL":
+            estado = "Sí facturar" if fac > 0 else "No facturar"
+            filas.append({"NUI":nui,"Estado de Facturación":estado,
+                "Motivo":"Ticket cerrado en el mes - No bloquea / Daño técnico (prorrateo)",
                 "Fuente de decisión":"SAC","SubMenu2":sub2,"NombreSeccionales":seccional,
                 **_extra_cols(tdata, True),
                 "Factor":fac,
