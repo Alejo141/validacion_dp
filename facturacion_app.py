@@ -362,13 +362,16 @@ def clasificar_nui_hurtos_con_sac(nui: str,
         hurto_submenu2    = ""
         hurto_seccional   = ""
 
-    # Calcular la FechaCreacion más temprana del hurto (fecha en que ocurrió)
-    fc_hurto_creac = pd.NaT
+    # Calcular la FechaCierre más reciente del hurto como referencia.
+    # La reposición solo es válida si su FechaCierre es POSTERIOR a la
+    # FechaCierre del hurto más reciente (indica que el equipo fue repuesto
+    # después de haber sido reportado como hurtado/cerrado el caso).
+    fc_hurto_cierre = pd.NaT
     if len(df_hurto_nui):
-        fc_hurto_col = parsear_fechas(df_hurto_nui["FechaCreacion"])             if "FechaCreacion" in df_hurto_nui.columns             else pd.Series([], dtype="datetime64[ns]")
+        fc_hurto_col = parsear_fechas(df_hurto_nui[COL_FC])             if COL_FC in df_hurto_nui.columns             else pd.Series([], dtype="datetime64[ns]")
         validas = fc_hurto_col.dropna()
         if len(validas):
-            fc_hurto_creac = validas.min()
+            fc_hurto_cierre = validas.max()
 
     # Filtrar tickets del NUI en SAC que tengan "REPOSICION" en Concatenado
     # Excluir tickets con FechaCreacion posterior al fin del mes
@@ -379,12 +382,12 @@ def clasificar_nui_hurtos_con_sac(nui: str,
         df_sac_valido["_concat_upper"].str.contains(REPOS, na=False)
     ]
 
-    # Filtrar reposiciones cuya FechaCierre sea POSTERIOR a la FechaCreacion del hurto.
-    # Una reposición anterior al hurto corresponde a un evento distinto → se ignora.
-    if pd.notna(fc_hurto_creac) and len(tickets_repos_raw):
+    # Filtrar reposiciones cuya FechaCierre sea POSTERIOR a la FechaCierre del hurto.
+    # Una reposición anterior al cierre del hurto corresponde a un evento distinto.
+    if pd.notna(fc_hurto_cierre) and len(tickets_repos_raw):
         tickets_repos = tickets_repos_raw[
-            tickets_repos_raw["_fc"].isna() |           # sin fecha: no se descarta aún
-            (tickets_repos_raw["_fc"] > fc_hurto_creac) # posterior al hurto
+            tickets_repos_raw["_fc"].isna() |            # sin fecha: no se descarta aún
+            (tickets_repos_raw["_fc"] > fc_hurto_cierre) # posterior al cierre del hurto
         ]
     else:
         tickets_repos = tickets_repos_raw
