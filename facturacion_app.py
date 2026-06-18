@@ -198,7 +198,7 @@ def clasificar_nui_sac(grupo: pd.DataFrame, ini: pd.Timestamp,
         sub    = r[COL_SUBMENU3]
         sub1   = quitar_tildes(str(r.get(COL_SUBMENU1, "")).strip().upper())
         sub2   = str(r.get(COL_SUBMENU2, "")).strip()
-        concat = str(r.get(COL_CONCAT, "")).upper()
+        concat = quitar_tildes(str(r.get(COL_CONCAT, ""))).upper()
         sem    = r[COL_SEMAFORO]
 
         # Ignorar tickets creados DESPUÉS del último día del mes analizado
@@ -243,7 +243,7 @@ def clasificar_nui_sac(grupo: pd.DataFrame, ini: pd.Timestamp,
             # Caso B: SubMenu1 = DAÑO (soporte técnico) cerrado dentro del mes
             # → puede haber estado abierto desde meses anteriores; prorratea
             # igual que BLOQUEA: desde ini_mes (o FechaCreacion si es del mes) hasta FechaCierre
-            elif fce < fin and sub1 == DANO_KEYWORD:
+            elif fce < fin and (sub1 == DANO_KEYWORD or DANO_KEYWORD in concat):
                 fcreac = parsear_fechas(pd.Series([r.get(col_creacion, "")])).iloc[0]
                 if pd.notna(fcreac) and fcreac > ini:
                     inicio_dano = max(fcreac, ini)
