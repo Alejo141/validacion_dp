@@ -338,13 +338,16 @@ def clasificar_nui_hurtos_con_sac(nui: str,
 
     Regla:
       1. Si NO existe ticket con "REPOSICION" en Concatenado (en SAC) → No facturar
-      2. Si existe ticket de reposición ABIERTO (Semáforo abierto) → No facturar
-      3. Si existe ticket de reposición CERRADO:
-           a. FechaCierre antes del mes o antes del ini → Sí facturar (mes completo)
-           b. FechaCierre dentro del mes               → Prorrateo
-           c. FechaCierre después del mes              → No facturar (cerró luego)
+      2. Si existe ticket de reposición pero su FechaCierre es ANTERIOR a la
+         FechaCreacion del hurto → se ignora (reposición de un evento previo)
+      3. Si existe ticket de reposición ABIERTO (Semáforo abierto) → No facturar
+      4. Si existe ticket de reposición CERRADO:
+           a. FechaCierre antes del mes → Sí facturar (mes completo)
+           b. FechaCierre dentro del mes → Prorrateo
+           c. FechaCierre después del mes → No facturar (cerró luego)
 
     "Reposición" se identifica por la palabra "REPOSICI" en el campo Concatenado.
+    La reposición solo es válida si su FechaCierre > FechaCreacion del hurto.
     """
     REPOS = REPOSICION_KEYWORD
 
@@ -359,14 +362,32 @@ def clasificar_nui_hurtos_con_sac(nui: str,
         hurto_submenu2    = ""
         hurto_seccional   = ""
 
+    # Calcular la FechaCreacion más temprana del hurto (fecha en que ocurrió)
+    fc_hurto_creac = pd.NaT
+    if len(df_hurto_nui):
+        fc_hurto_col = parsear_fechas(df_hurto_nui["FechaCreacion"])             if "FechaCreacion" in df_hurto_nui.columns             else pd.Series([], dtype="datetime64[ns]")
+        validas = fc_hurto_col.dropna()
+        if len(validas):
+            fc_hurto_creac = validas.min()
+
     # Filtrar tickets del NUI en SAC que tengan "REPOSICION" en Concatenado
     # Excluir tickets con FechaCreacion posterior al fin del mes
     df_sac_valido = df_sac_nui[
         df_sac_nui["_fc_creac"].isna() | (df_sac_nui["_fc_creac"] <= fin)
     ]
-    tickets_repos = df_sac_valido[
+    tickets_repos_raw = df_sac_valido[
         df_sac_valido["_concat_upper"].str.contains(REPOS, na=False)
     ]
+
+    # Filtrar reposiciones cuya FechaCierre sea POSTERIOR a la FechaCreacion del hurto.
+    # Una reposición anterior al hurto corresponde a un evento distinto → se ignora.
+    if pd.notna(fc_hurto_creac) and len(tickets_repos_raw):
+        tickets_repos = tickets_repos_raw[
+            tickets_repos_raw["_fc"].isna() |           # sin fecha: no se descarta aún
+            (tickets_repos_raw["_fc"] > fc_hurto_creac) # posterior al hurto
+        ]
+    else:
+        tickets_repos = tickets_repos_raw
 
     # ── Sin ticket de reposición → No facturar ────────────────────────────
     if tickets_repos.empty:
