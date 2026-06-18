@@ -231,8 +231,15 @@ def clasificar_nui_sac(grupo: pd.DataFrame, ini: pd.Timestamp,
 
         elif sub == SUBMENU_NO_BLOQUEA:
             # Caso A: contiene "Reposición" en Concatenado → prorrateo si cerrado en mes
+            # Misma lógica de inicio que BLOQUEA: si el ticket se creó dentro del mes,
+            # el bloqueo inicia en FechaCreacion; si venía de antes, inicia en ini_mes.
             if fce < fin and REPOSICION_KEYWORD in concat:
-                activos_repos.append((fce, sub2, extraer_datos_ticket(r)))
+                fcreac = parsear_fechas(pd.Series([r.get(col_creacion, "")])).iloc[0]
+                if pd.notna(fcreac) and fcreac > ini:
+                    inicio_repos = max(fcreac, ini)
+                else:
+                    inicio_repos = ini
+                activos_repos.append((inicio_repos, fce, sub2, extraer_datos_ticket(r)))
             # Caso B: SubMenu1 = DAÑO (soporte técnico) cerrado dentro del mes
             # → puede haber estado abierto desde meses anteriores; prorratea
             # igual que BLOQUEA: desde ini_mes (o FechaCreacion si es del mes) hasta FechaCierre
@@ -291,14 +298,23 @@ def clasificar_nui_sac(grupo: pd.DataFrame, ini: pd.Timestamp,
 
     # ── Prioridad 3: NO BLOQUEA + REPOSICION cerrado en el mes → prorrateo ─
     if activos_repos:
-        # Tomar el cierre más tardío (mayor días bloqueados)
-        fc_max      = max(t[0] for t in activos_repos)
-        submenu2    = next(t[1] for t in activos_repos if t[0] == fc_max)
-        ticket_data = next(t[2] for t in activos_repos if t[0] == fc_max)
-        f, df_, dt_ = calcular_prorrateo(fc_max, ini, fin, dias_mes)
-        return {"_dec":"REPOSICION_PARCIAL", "_factor":f,
-                "_dias_fact":df_, "_dias_total":dt_, "_fc_display":fc_max,
-                "_submenu2":submenu2, "_ticket_data":ticket_data}
+        # Tomar el inicio más temprano y el cierre más tardío entre los tickets
+        # de reposición activos, igual que la lógica de BLOQUEA/DAÑO.
+        inicio_min  = min(t[0] for t in activos_repos)
+        fc_max      = max(t[1] for t in activos_repos)
+        submenu2    = next(t[2] for t in activos_repos if t[1] == fc_max)
+        ticket_data = next(t[3] for t in activos_repos if t[1] == fc_max)
+
+        inicio_bloq_efectivo = max(inicio_min, ini)
+        fin_bloq_efectivo    = min(fc_max, fin)
+        dias_bloqueados      = (fin_bloq_efectivo - inicio_bloq_efectivo).days + 1
+        dias_fact            = dias_mes - dias_bloqueados
+        if dias_fact < 0: dias_fact = 0
+        factor = round(dias_fact / dias_mes, 6)
+        return {"_dec":"REPOSICION_PARCIAL", "_factor":factor,
+                "_dias_fact":int(dias_fact), "_dias_total":dias_mes,
+                "_fc_display":fin_bloq_efectivo, "_submenu2":submenu2,
+                "_ticket_data":ticket_data}
 
     # ── Prioridad 4: NO BLOQUEA + DAÑO (técnico) cerrado en el mes → prorrateo
     # Puede haber estado abierto desde meses anteriores; se prorratea igual
